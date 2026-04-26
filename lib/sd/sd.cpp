@@ -96,9 +96,30 @@ namespace sd {
 
     int setup() {
         if (initialized) return 0;
-        if (!SD.begin(SD_CS_PIN)) {
+
+        const int MAX_SD_INIT_ATTEMPTS = 5;
+        const int SD_INIT_DELAY_MS = 200;
+        bool firstAttempt = true;
+        bool ok = false;
+
+        for (int attempt = 0; attempt < MAX_SD_INIT_ATTEMPTS; ++attempt) {
+            ok = SD.begin(SD_CS_PIN);
+            if (ok) {
+                break;
+            }
+
+            if (firstAttempt) {
+                Serial.println("WARNING: SD.begin() failed on first attempt, retrying...");
+                firstAttempt = false;
+            }
+
+            delay(SD_INIT_DELAY_MS);
+        }
+
+        if (!ok) {
             return 1;
         }
+
         initialized = true;
         return 0;
     }
