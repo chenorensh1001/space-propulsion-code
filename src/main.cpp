@@ -4,23 +4,15 @@
 
 #include "config.h"
 #include "bmp.h"
-#include "imu.h"
 #include "sd_driver.h"
 
-// ===================== H-bridge motor pins =====================
-//
-// Your wiring:
-//
-// Teensy pin 2 -> H-bridge IN1
-// Teensy pin 3 -> H-bridge IN2
-//
-// Teensy pin 5 -> H-bridge IN3
-// Teensy pin 6 -> H-bridge IN4
-//
-// Motor A uses IN1 and IN2.
-// Motor B uses IN3 and IN4.
+#ifndef DEPLOY_MOTOR_PWM
+#define DEPLOY_MOTOR_PWM 150
+#endif
 
-// Pin and timing configuration is defined in lib/include/config.h.
+#ifndef RETRACT_MOTOR_ON_TIME_MS
+#define RETRACT_MOTOR_ON_TIME_MS 300
+#endif
 
 // ===================== State machine =====================
 
@@ -34,8 +26,8 @@ RocketState currentState = RocketState::ACTIVE;
 
 // ===================== Flight parameters =====================
 
-constexpr float LIFTOFF_ALTITUDE_DELTA_M = 0.50f; //will be 5 meter,s 10 cm for testing
-constexpr uint32_t PARACHUTE_TIMER_MS = 3000;
+constexpr float LIFTOFF_ALTITUDE_DELTA_M = 0.30f; // Testing value
+constexpr uint32_t PARACHUTE_TIMER_MS = 2700;
 
 // ===================== Altitude and time reference =====================
 
@@ -56,6 +48,8 @@ constexpr float ALTITUDE_DECREASE_TOLERANCE_M = 0.10f;
 
 bool deploymentMotorsActive = false;
 uint32_t deploymentStartTimeMs = 0;
+
+// ===================== LEDs =====================
 
 void setPowerLed(bool on) {
   digitalWrite(LED_POWER_PIN, on ? HIGH : LOW);
@@ -103,7 +97,7 @@ void logEvent(const char* eventName) {
   snprintf(
     line,
     sizeof(line),
-    "%lu,EVENT_%s,,,",
+    "%lu,EVENT_%s,",
     static_cast<unsigned long>(millis()),
     eventName
   );
@@ -124,16 +118,21 @@ void resetAltitudeHistory() {
   }
 }
 
+// ===================== SD log file handling =====================
+
 int currentRunNumber = 0;
 
 int findNextRunNumber() {
   char path[32];
+
   for (int run = 1; run <= 999; ++run) {
     snprintf(path, sizeof(path), "/logs/flight%03d.csv", run);
+
     if (!sd::exists(path)) {
       return run;
     }
   }
+
   return -1;
 }
 
@@ -144,6 +143,7 @@ bool openRunLogFile() {
   }
 
   currentRunNumber = findNextRunNumber();
+
   if (currentRunNumber < 1) {
     Serial.println("ERROR: Too many run log files.");
     return false;
@@ -164,62 +164,23 @@ bool openRunLogFile() {
   return true;
 }
 
-constexpr int SERIAL_COMMAND_BUFFER_SIZE = 48;
-char serialCommandBuffer[SERIAL_COMMAND_BUFFER_SIZE];
-int serialCommandLength = 0;
-
-int findLastRunNumber();
-bool readLastRunFile();
-
-void processSerialCommandLine() {
-  serialCommandBuffer[serialCommandLength] = '\0';
-  String cmd = String(serialCommandBuffer);
-  cmd.trim();
-  cmd.toLowerCase();
-
-  if (cmd == "readlast" || cmd == "read_last") {
-    readLastRunFile();
-  } else if (cmd == "help") {
-    Serial.println("Serial commands: readlast, help");
-  } else if (serialCommandLength > 0) {
-    Serial.print("Unknown command: ");
-    Serial.println(cmd);
-    Serial.println("Type help for available commands.");
-  }
-
-  serialCommandLength = 0;
-}
-
-void processSerialInput() {
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\r' || c == '\n') {
-      if (serialCommandLength > 0) {
-        processSerialCommandLine();
-      }
-      serialCommandLength = 0;
-      continue;
-    }
-
-    if (serialCommandLength < SERIAL_COMMAND_BUFFER_SIZE - 1) {
-      serialCommandBuffer[serialCommandLength++] = c;
-    }
-  }
-}
-
 int findLastRunNumber() {
   char path[32];
+
   for (int run = 999; run >= 1; --run) {
     snprintf(path, sizeof(path), "/logs/flight%03d.csv", run);
+
     if (sd::exists(path)) {
       return run;
     }
   }
+
   return 0;
 }
 
 bool readLastRunFile() {
   int lastRun = findLastRunNumber();
+
   if (lastRun == 0) {
     Serial.println("No log files found.");
     return false;
@@ -232,6 +193,7 @@ bool readLastRunFile() {
   Serial.println(path);
 
   File file = SD.open(path, FILE_READ);
+
   if (!file) {
     Serial.print("Failed to open ");
     Serial.println(path);
@@ -242,24 +204,72 @@ bool readLastRunFile() {
     String line = file.readStringUntil('\n');
     Serial.println(line);
   }
-  file.close();
 
+  file.close();
   return true;
 }
 
-void logFlightData(uint32_t now, float altitudeM, float accelX, float accelY, float accelZ) {
-  char line[140];
+// ===================== Serial commands =====================
+
+constexpr int SERIAL_COMMAND_BUFFER_SIZE = 48;
+char serialCommandBuffer[SERIAL_COMMAND_BUFFER_SIZE];
+int serialCommandLength = 0;
+
+void processSerialCommandLine() {
+  serialCommandBuffer[serialCommandLength] = '\0';
+
+  String cmd = String(serialCommandBuffer);
+  cmd.trim();
+  cmd.toLowerCase();
+
+  if (cmd == "readlast" || cmd == "read_last") {
+    readLastRunFile();
+
+  } else if (cmd == "help") {
+    Serial.println("Serial commands:");
+    Serial.println("  readlast  - print latest SD log file");
+    Serial.println("  help      - show this help");
+
+  } else if (serialCommandLength > 0) {
+    Serial.print("Unknown command: ");
+    Serial.println(cmd);
+    Serial.println("Type help for available commands.");
+  }
+
+  serialCommandLength = 0;
+}
+
+void processSerialInput() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\r' || c == '\n') {
+      if (serialCommandLength > 0) {
+        processSerialCommandLine();
+      }
+
+      serialCommandLength = 0;
+      continue;
+    }
+
+    if (serialCommandLength < SERIAL_COMMAND_BUFFER_SIZE - 1) {
+      serialCommandBuffer[serialCommandLength++] = c;
+    }
+  }
+}
+
+// ===================== Logging =====================
+
+void logFlightData(uint32_t now, float altitudeM) {
+  char line[100];
 
   snprintf(
     line,
     sizeof(line),
-    "%lu,%s,%.2f,%.3f,%.3f,%.3f",
+    "%lu,%s,%.2f",
     static_cast<unsigned long>(now),
     stateToString(currentState),
-    altitudeM,
-    accelX,
-    accelY,
-    accelZ
+    altitudeM
   );
 
   sd::writeLine(line);
@@ -271,6 +281,8 @@ void logFlightData(uint32_t now, float altitudeM, float accelX, float accelY, fl
     lastFlushMs = now;
   }
 }
+
+// ===================== Altitude logic =====================
 
 void addAltitudeMeasurement(float altitudeM) {
   altitudeHistory[altitudeHistoryIndex] = altitudeM;
@@ -312,37 +324,76 @@ bool flightTimerExpired(uint32_t now) {
 
 // ===================== Motor control functions =====================
 
+void writeMotorOutputsOff() {
+  analogWrite(MOTOR_A_IN1_PIN, 0);
+  analogWrite(MOTOR_A_IN2_PIN, 0);
+  analogWrite(MOTOR_B_IN3_PIN, 0);
+  analogWrite(MOTOR_B_IN4_PIN, 0);
+
+  digitalWrite(MOTOR_A_IN1_PIN, LOW);
+  digitalWrite(MOTOR_A_IN2_PIN, LOW);
+  digitalWrite(MOTOR_B_IN3_PIN, LOW);
+  digitalWrite(MOTOR_B_IN4_PIN, LOW);
+}
+
 void stopDeploymentMotors() {
-  if (DEPLOYMENT_MOTOR_OUTPUT_ENABLED) {
-    digitalWrite(MOTOR_A_IN1_PIN, LOW);
-    digitalWrite(MOTOR_A_IN2_PIN, LOW);
+  writeMotorOutputsOff();
 
-    digitalWrite(MOTOR_B_IN3_PIN, LOW);
-    digitalWrite(MOTOR_B_IN4_PIN, LOW);
+  if (deploymentMotorsActive) {
+    deploymentMotorsActive = false;
+
+    Serial.println("Deployment motors stopped.");
+    logEvent("DEPLOYMENT_MOTORS_OFF");
   }
-
-  deploymentMotorsActive = false;
-
-  Serial.println("Deployment motors stopped.");
-  logEvent("DEPLOYMENT_MOTORS_OFF");
 }
 
 void activateDeploymentMotors(uint32_t now) {
-  if (DEPLOYMENT_MOTOR_OUTPUT_ENABLED) {
-    // Motor A forward
-    digitalWrite(MOTOR_A_IN1_PIN, HIGH);
-    digitalWrite(MOTOR_A_IN2_PIN, LOW);
-
-    // Motor B forward
-    digitalWrite(MOTOR_B_IN3_PIN, HIGH);
-    digitalWrite(MOTOR_B_IN4_PIN, LOW);
+  if (deploymentMotorsActive) {
+    return;
   }
 
   deploymentStartTimeMs = now;
   deploymentMotorsActive = true;
 
-  Serial.println("Deployment motors activated.");
+  if (DEPLOYMENT_MOTOR_OUTPUT_ENABLED) {
+    // Motor A forward
+    analogWrite(MOTOR_A_IN1_PIN, DEPLOY_MOTOR_PWM);
+    digitalWrite(MOTOR_A_IN2_PIN, LOW);
+
+    // Motor B forward
+    analogWrite(MOTOR_B_IN3_PIN, DEPLOY_MOTOR_PWM);
+    digitalWrite(MOTOR_B_IN4_PIN, LOW);
+
+    Serial.println("Deployment motors activated: output enabled.");
+  } else {
+    Serial.println("Deployment motors activated: output disabled in config.");
+  }
+
   logEvent("DEPLOYMENT_MOTORS_ON");
+}
+
+void retractDeploymentMotorsAtStartup() {
+  Serial.println("Startup motor retraction requested.");
+
+  if (!DEPLOYMENT_MOTOR_OUTPUT_ENABLED) {
+    Serial.println("Startup retraction skipped: motor output disabled in config.");
+    writeMotorOutputsOff();
+    return;
+  }
+
+  // Motor A reverse
+  digitalWrite(MOTOR_A_IN1_PIN, LOW);
+  analogWrite(MOTOR_A_IN2_PIN, DEPLOY_MOTOR_PWM);
+
+  // Motor B reverse
+  digitalWrite(MOTOR_B_IN3_PIN, LOW);
+  analogWrite(MOTOR_B_IN4_PIN, DEPLOY_MOTOR_PWM);
+
+  delay(RETRACT_MOTOR_ON_TIME_MS);
+
+  writeMotorOutputsOff();
+
+  Serial.println("Startup motor retraction complete.");
 }
 
 // ===================== State handlers =====================
@@ -399,34 +450,34 @@ void setup() {
   // LED pins
   pinMode(LED_POWER_PIN, OUTPUT);
   pinMode(LED_STATUS_PIN, OUTPUT);
+
   setPowerLed(true);
   setStatusLed(false);
 
   // H-bridge motor control pins
   pinMode(MOTOR_A_IN1_PIN, OUTPUT);
   pinMode(MOTOR_A_IN2_PIN, OUTPUT);
-
   pinMode(MOTOR_B_IN3_PIN, OUTPUT);
   pinMode(MOTOR_B_IN4_PIN, OUTPUT);
 
-  // Make sure motors are off at startup
-  digitalWrite(MOTOR_A_IN1_PIN, LOW);
-  digitalWrite(MOTOR_A_IN2_PIN, LOW);
+  // Teensy PWM resolution: 0 to 255
+  analogWriteResolution(8);
 
-  digitalWrite(MOTOR_B_IN3_PIN, LOW);
-  digitalWrite(MOTOR_B_IN4_PIN, LOW);
+  // Make sure motors are off at startup
+  writeMotorOutputsOff();
+  deploymentMotorsActive = false;
+
+  // Pull motors back at startup
+  retractDeploymentMotorsAtStartup();
+
+  // Make sure motors are off after startup retraction
+  writeMotorOutputsOff();
+  deploymentMotorsActive = false;
 
   // Initialize BMP altitude sensor
   if (bmp::setup() != 0) {
     Serial.println("ERROR: BMP setup failed.");
-    while (true) {
-      blinkStatusLedFor(1000);
-    }
-  }
 
-  // Initialize IMU
-  if (imu::setup() != 0) {
-    Serial.println("ERROR: IMU setup failed.");
     while (true) {
       blinkStatusLedFor(1000);
     }
@@ -435,6 +486,7 @@ void setup() {
   // Initialize SD card
   if (sd::setup() != 0) {
     Serial.println("ERROR: SD setup failed.");
+
     while (true) {
       blinkStatusLedFor(1000);
     }
@@ -448,7 +500,7 @@ void setup() {
   }
 
   // Write CSV header
-  sd::writeLine("time_ms,state,altitude_m,accel_x_m_s2,accel_y_m_s2,accel_z_m_s2");
+  sd::writeLine("time_ms,state,altitude_m");
   sd::flush();
 
   // Start in ACTIVE state
@@ -458,6 +510,7 @@ void setup() {
   Serial.println("Saving reference altitude...");
 
   bmp::Reading altitudeReading;
+
   const int MAX_STARTUP_ATTEMPTS = 10;
   const float STARTUP_ALTITUDE_LIMIT_M = 1000.0f;
   int attempt = 0;
@@ -467,6 +520,7 @@ void setup() {
 
     if (!altitudeReading.valid) {
       Serial.println("ERROR: Could not read startup altitude.");
+
       while (true) {
         delay(1000);
       }
@@ -486,10 +540,12 @@ void setup() {
     Serial.println("Startup altitude too high, retrying...");
     delay(200);
     attempt++;
+
   } while (attempt < MAX_STARTUP_ATTEMPTS);
 
   if (altitudeReading.altitude > STARTUP_ALTITUDE_LIMIT_M) {
     Serial.println("ERROR: startup altitude did not settle to a valid value.");
+
     while (true) {
       delay(1000);
     }
@@ -505,22 +561,26 @@ void setup() {
   logEvent("ENTER_ACTIVE");
 
   setStatusLed(true);
+
   Serial.println("Setup complete.");
   Serial.println("Type 'readlast' and press Enter to display the latest run file.");
 }
 
-// ===================== Main loop ====
+// ===================== Main loop =====================
 
 void loop() {
   processSerialInput();
+
   const uint32_t now = millis();
 
   handleDeploymentState(now);
 
   static uint32_t lastBmpSampleMs = 0;
+
   if (now - lastBmpSampleMs < BMP_SAMPLE_INTERVAL_MS) {
     return;
   }
+
   lastBmpSampleMs = now;
 
   bmp::Reading altitudeReading = bmp::read();
@@ -530,20 +590,10 @@ void loop() {
     return;
   }
 
-  sensors_event_t accelEvent;
-  sensors_event_t gyroEvent;
-  sensors_event_t magEvent;
-  sensors_event_t tempEvent;
-  imu::read(accelEvent, gyroEvent, magEvent, tempEvent);
-
   const float altitudeM = altitudeReading.altitude;
   const float relativeAltitudeM = altitudeM - referenceAltitudeM;
 
-  logFlightData(now,
-                altitudeM,
-                accelEvent.acceleration.x,
-                accelEvent.acceleration.y,
-                accelEvent.acceleration.z);
+  logFlightData(now, altitudeM);
 
   switch (currentState) {
     case RocketState::ACTIVE:
