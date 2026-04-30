@@ -26,7 +26,7 @@ RocketState currentState = RocketState::ACTIVE;
 
 // ===================== Flight parameters =====================
 
-constexpr float LIFTOFF_ALTITUDE_DELTA_M = 0.30f; // Testing value
+constexpr float LIFTOFF_ALTITUDE_DELTA_M = 1.00f; // Testing value
 constexpr uint32_t PARACHUTE_TIMER_MS = 2700;
 
 // ===================== Altitude and time reference =====================
@@ -178,6 +178,56 @@ int findLastRunNumber() {
   return 0;
 }
 
+bool makeRunLogPath(int runNumber, char* path, size_t pathSize) {
+  if (runNumber < 1 || runNumber > 999 || path == nullptr || pathSize == 0) {
+    return false;
+  }
+
+  snprintf(path, pathSize, "/logs/flight%03d.csv", runNumber);
+  return true;
+}
+
+bool readFileToTerminal(const char* path) {
+  if (path == nullptr || path[0] == '\0') {
+    Serial.println("ERROR: Missing file path.");
+    return false;
+  }
+
+  sd::flush();
+
+  File file = SD.open(path, FILE_READ);
+
+  if (!file) {
+    Serial.print("ERROR: Failed to open ");
+    Serial.println(path);
+    return false;
+  }
+
+  Serial.print("Reading file to terminal: ");
+  Serial.println(path);
+  Serial.println("----- FILE START -----");
+
+  uint8_t buffer[128];
+
+  while (file.available()) {
+    int bytesRead = file.read(buffer, sizeof(buffer));
+
+    if (bytesRead <= 0) {
+      break;
+    }
+
+    Serial.write(buffer, static_cast<size_t>(bytesRead));
+    delay(1);
+  }
+
+  Serial.println();
+  Serial.println("----- FILE END -----");
+
+  file.close();
+  Serial.flush();
+  return true;
+}
+
 bool readLastRunFile() {
   int lastRun = findLastRunNumber();
 
@@ -187,52 +237,187 @@ bool readLastRunFile() {
   }
 
   char path[32];
-  snprintf(path, sizeof(path), "/logs/flight%03d.csv", lastRun);
+  makeRunLogPath(lastRun, path, sizeof(path));
 
-  Serial.print("Reading last log file: ");
-  Serial.println(path);
+  return readFileToTerminal(path);
+}
+
+void listLogFiles() {
+  sd::flush();
+
+  File dir = SD.open("/logs");
+
+  if (!dir) {
+    Serial.println("ERROR: Could not open /logs directory.");
+    return;
+  }
+
+  if (!dir.isDirectory()) {
+    Serial.println("ERROR: /logs exists but is not a directory.");
+    dir.close();
+    return;
+  }
+
+  Serial.println("LOG FILES:");
+
+  bool foundAny = false;
+
+  while (true) {
+    File entry = dir.openNextFile();
+
+    if (!entry) {
+      break;
+    }
+
+    if (!entry.isDirectory()) {
+      foundAny = true;
+      Serial.print("  ");
+      Serial.print(entry.name());
+      Serial.print("  ");
+      Serial.print(static_cast<unsigned long>(entry.size()));
+      Serial.println(" bytes");
+    }
+
+    entry.close();
+  }
+
+  if (!foundAny) {
+    Serial.println("  No files found in /logs.");
+  }
+
+  dir.close();
+}
+
+bool exportFileToSerial(const char* path) {
+  if (path == nullptr || path[0] == '\0') {
+    Serial.println("ERROR: Missing file path.");
+    return false;
+  }
+
+  sd::flush();
 
   File file = SD.open(path, FILE_READ);
 
   if (!file) {
-    Serial.print("Failed to open ");
+    Serial.print("ERROR: Failed to open ");
     Serial.println(path);
     return false;
   }
 
+  const unsigned long fileSizeBytes = static_cast<unsigned long>(file.size());
+
+  // Important: the computer-side script can use this header and byte count
+  // to save exactly the file contents, without relying on terminal scrollback.
+  Serial.print("BEGIN_FILE ");
+  Serial.print(path);
+  Serial.print(" ");
+  Serial.println(fileSizeBytes);
+
+  uint8_t buffer[256];
+  unsigned long totalSent = 0;
+
   while (file.available()) {
-    String line = file.readStringUntil('\n');
-    Serial.println(line);
+    int bytesRead = file.read(buffer, sizeof(buffer));
+
+    if (bytesRead <= 0) {
+      break;
+    }
+
+    Serial.write(buffer, static_cast<size_t>(bytesRead));
+    totalSent += static_cast<unsigned long>(bytesRead);
+    delay(1);
   }
 
   file.close();
+  Serial.flush();
+
+  Serial.println();
+  Serial.print("END_FILE ");
+  Serial.print(path);
+  Serial.print(" ");
+  Serial.print(totalSent);
+  Serial.println(" bytes_sent");
+
   return true;
+}
+
+bool exportRunToSerial(int runNumber) {
+  char path[32];
+
+  if (!makeRunLogPath(runNumber, path, sizeof(path))) {
+    Serial.println("ERROR: Run number must be between 1 and 999.");
+    return false;
+  }
+
+  return exportFileToSerial(path);
+}
+
+bool exportLastRunToSerial() {
+  int lastRun = findLastRunNumber();
+
+  if (lastRun == 0) {
+    Serial.println("No log files found.");
+    return false;
+  }
+
+  return exportRunToSerial(lastRun);
 }
 
 // ===================== Serial commands =====================
 
-constexpr int SERIAL_COMMAND_BUFFER_SIZE = 48;
+constexpr int SERIAL_COMMAND_BUFFER_SIZE = 96;
 char serialCommandBuffer[SERIAL_COMMAND_BUFFER_SIZE];
 int serialCommandLength = 0;
+
+void printSerialHelp() {
+  Serial.println("Serial commands:");
+  Serial.println("  help                 - show this help");
+  Serial.println("  listlogs / ls        - list log files on the SD card");
+  Serial.println("  readlast             - print latest SD log file to the terminal");
+  Serial.println("  exportlast           - export latest SD log file over USB Serial");
+  Serial.println("  export 3             - export /logs/flight003.csv over USB Serial");
+  Serial.println("  export /logs/name    - export a file by full SD path");
+}
 
 void processSerialCommandLine() {
   serialCommandBuffer[serialCommandLength] = '\0';
 
-  String cmd = String(serialCommandBuffer);
-  cmd.trim();
-  cmd.toLowerCase();
+  String commandLine = String(serialCommandBuffer);
+  commandLine.trim();
 
-  if (cmd == "readlast" || cmd == "read_last") {
+  String lowerCommandLine = commandLine;
+  lowerCommandLine.toLowerCase();
+
+  if (lowerCommandLine == "readlast" || lowerCommandLine == "read_last") {
     readLastRunFile();
 
-  } else if (cmd == "help") {
-    Serial.println("Serial commands:");
-    Serial.println("  readlast  - print latest SD log file");
-    Serial.println("  help      - show this help");
+  } else if (lowerCommandLine == "listlogs" || lowerCommandLine == "ls") {
+    listLogFiles();
+
+  } else if (lowerCommandLine == "exportlast" || lowerCommandLine == "export_last") {
+    exportLastRunToSerial();
+
+  } else if (lowerCommandLine.startsWith("export ")) {
+    String argument = commandLine.substring(commandLine.indexOf(' ') + 1);
+    argument.trim();
+
+    if (argument.length() == 0) {
+      Serial.println("ERROR: Missing export argument. Example: export 3");
+    } else if (argument[0] >= '0' && argument[0] <= '9') {
+      int runNumber = argument.toInt();
+      exportRunToSerial(runNumber);
+    } else {
+      char path[80];
+      argument.toCharArray(path, sizeof(path));
+      exportFileToSerial(path);
+    }
+
+  } else if (lowerCommandLine == "help") {
+    printSerialHelp();
 
   } else if (serialCommandLength > 0) {
     Serial.print("Unknown command: ");
-    Serial.println(cmd);
+    Serial.println(commandLine);
     Serial.println("Type help for available commands.");
   }
 
@@ -563,7 +748,7 @@ void setup() {
   setStatusLed(true);
 
   Serial.println("Setup complete.");
-  Serial.println("Type 'readlast' and press Enter to display the latest run file.");
+  Serial.println("Type 'help' and press Enter to see SD log commands.");
 }
 
 // ===================== Main loop =====================

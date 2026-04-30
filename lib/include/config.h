@@ -25,8 +25,8 @@
 
 // Start short for testing.
 // Later, increase only if the mechanism needs more time.
-#define DEPLOY_MOTOR_ON_TIME_MS 10000
-#define RETRACT_MOTOR_ON_TIME_MS 0
+#define DEPLOY_MOTOR_ON_TIME_MS 5000
+#define RETRACT_MOTOR_ON_TIME_MS 5000
 
 /* --- Motor PWM --- */
 
@@ -35,7 +35,7 @@
 //
 // If you power the H-bridge motor side with a true 3 V supply,
 // you can use 255.
-#define DEPLOY_MOTOR_PWM 250
+#define DEPLOY_MOTOR_PWM 255
 
 /* --- LED Configuration --- */
 #define LED_POWER_PIN 13
